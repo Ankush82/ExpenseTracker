@@ -670,35 +670,6 @@ def show_sms_inbox():
 def show_settings():
     st.title("⚙️ Settings")
 
-    st.subheader("OpenRouter API Key")
-    st.caption(
-        "Get your API key from [openrouter.ai](https://openrouter.ai). "
-        "The key is stored only in your session (not persisted to disk)."
-    )
-
-    key_input = st.text_input(
-        "API Key",
-        value=st.session_state.openrouter_key,
-        type="password",
-        placeholder="sk-or-...",
-    )
-    if st.button("Save Key"):
-        st.session_state.openrouter_key = key_input.strip()
-        st.success("API key saved for this session.")
-
-    st.divider()
-    st.subheader("Persistent Key (recommended for deployment)")
-    st.markdown("""
-Create a `.streamlit/secrets.toml` file in the project root:
-
-```toml
-OPENROUTER_API_KEY = "sk-or-your-key-here"
-```
-
-Then redeploy — the key will be auto-loaded on startup.
-""")
-
-    st.divider()
     st.subheader("📱 iPhone Shortcut Setup")
     st.caption("Set up the automation that silently sends your bank SMS to this app.")
 
