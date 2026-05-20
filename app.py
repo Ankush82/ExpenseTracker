@@ -32,11 +32,16 @@ if "user_id" not in st.session_state:
     st.session_state.display_name = None
 
 if "openrouter_key" not in st.session_state:
-    # Load from Streamlit secrets if available
     try:
         st.session_state.openrouter_key = st.secrets["OPENROUTER_API_KEY"]
     except Exception:
         st.session_state.openrouter_key = ""
+
+if "serper_key" not in st.session_state:
+    try:
+        st.session_state.serper_key = st.secrets["SERPER_API_KEY"]
+    except Exception:
+        st.session_state.serper_key = ""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,6 +69,9 @@ def format_inr(amount: float) -> str:
 
 def api_key() -> str:
     return st.session_state.openrouter_key
+
+def serper_key() -> str:
+    return st.session_state.serper_key
 
 
 # ---------------------------------------------------------------------------
@@ -248,18 +256,17 @@ def show_dashboard():
         use_container_width=True,
     )
 
-    # Transaction table
+    # Transaction table with per-row delete
     st.subheader("Transactions")
-    display_df = df[["date", "user", "merchant", "amount", "category", "source", "notes"]].copy()
-    display_df["amount"] = display_df["amount"].apply(format_inr)
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    # Delete a transaction
-    with st.expander("Delete a transaction"):
-        tx_id = st.number_input("Transaction ID to delete", min_value=1, step=1)
-        if st.button("Delete", type="primary"):
-            db.delete_transaction(int(tx_id))
-            st.success(f"Transaction {tx_id} deleted.")
+    for _, row in df.iterrows():
+        c1, c2, c3, c4, c5, c6 = st.columns([1.2, 2, 2.5, 1.5, 1.5, 0.6])
+        c1.caption(row["date"])
+        c2.write(row["merchant"] or "—")
+        c3.caption(f"{row['user']}  ·  {row['category']}")
+        c4.write(format_inr(row["amount"]))
+        c5.caption(row.get("notes", "") or "")
+        if c6.button("🗑", key=f"del_{row['id']}", help="Delete this transaction"):
+            db.delete_transaction(int(row["id"]))
             st.rerun()
 
 
@@ -278,11 +285,7 @@ def show_add_sms():
         "You can paste multiple messages separated by a blank line."
     )
 
-    sms_text = st.text_area(
-        "Paste SMS messages here",
-        height=200,
-        placeholder="Spent INR 2095 Axis Bank Card no. XX4830 19-05-26 09:17:50 IST BUNDL TECHN ...\n\nUPDATE: INR 12,200.00 debited from HDFC Bank XX7750 on 20-MAY-26. Info: ACH D- BOI EMI...",
-    )
+    sms_text = st.text_area("Paste SMS messages here", height=200)
 
     if st.button("Parse SMS", type="primary", disabled=not sms_text.strip()):
         with st.spinner("Parsing…"):
@@ -314,9 +317,15 @@ def show_add_sms():
                     if api_key() and st.button("🔍 Lookup", key=f"lookup_{i}",
                                                help="Search who this merchant really is"):
                         with st.spinner("Searching…"):
-                            resolved, source = ai_service.lookup_merchant(api_key(), merchant)
+                            resolved, source = ai_service.lookup_merchant(
+                                api_key(), merchant, serper_key=serper_key()
+                            )
                         st.session_state[f"merchant_resolved_{i}"] = resolved
-                        src_label = {"known": "local db", "web": "web search", "ai": "AI", "original": "not found"}.get(source, source)
+                        src_label = {
+                            "local": "local db", "mca21": "MCA21 registry",
+                            "serper": "Google search", "ddg": "web search",
+                            "ai": "AI", "original": "not found",
+                        }.get(source.split()[0], source)
                         st.toast(f"Found via {src_label}: {resolved}")
                         st.rerun()
 
@@ -745,6 +754,16 @@ New transactions appear in **📥 SMS Inbox** for your review.
 # ---------------------------------------------------------------------------
 
 def main():
+    # Hide Streamlit branding, GitHub button, and footer
+    st.markdown("""
+        <style>
+        #MainMenu {visibility: hidden;}
+        header[data-testid="stHeader"] a[href*="github"] {display: none !important;}
+        footer {visibility: hidden;}
+        [data-testid="stToolbar"] {display: none !important;}
+        </style>
+    """, unsafe_allow_html=True)
+
     if not st.session_state.user_id:
         show_login()
         return

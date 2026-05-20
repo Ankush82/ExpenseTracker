@@ -64,6 +64,15 @@ def init_db():
         pass  # column already exists
 
     c.execute("""
+        CREATE TABLE IF NOT EXISTS merchant_cache (
+            code TEXT PRIMARY KEY,
+            resolved_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS config (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -121,6 +130,25 @@ def get_all_users() -> pd.DataFrame:
     df = pd.read_sql_query("SELECT id, display_name FROM users ORDER BY id", conn)
     conn.close()
     return df
+
+
+def get_cached_merchant(code: str) -> Optional[tuple]:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT resolved_name, source FROM merchant_cache WHERE code=?", (code.strip().lower(),))
+    row = c.fetchone()
+    conn.close()
+    return (row[0], row[1]) if row else None
+
+
+def cache_merchant(code: str, resolved_name: str, source: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT OR REPLACE INTO merchant_cache (code, resolved_name, source) VALUES (?,?,?)",
+        (code.strip().lower(), resolved_name, source),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_config(key: str) -> Optional[str]:

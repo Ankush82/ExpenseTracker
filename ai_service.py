@@ -7,6 +7,7 @@ import urllib.parse
 import urllib.request
 from typing import Optional  # noqa: F401
 
+import requests
 from openai import OpenAI
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
@@ -174,128 +175,170 @@ def _match_category(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Merchant name lookup (cryptic UPI codes → real business names)
+# Merchant name lookup  (SQLite cache → MCA21 → Serper → DDG → AI)
 # ---------------------------------------------------------------------------
 
-# Known Indian UPI merchant codes — instant lookup, no network needed
-_KNOWN_MERCHANTS: dict[str, str] = {
-    "bundl techn": "Swiggy",
-    "bundltech": "Swiggy",
-    "internet pvt": "Swiggy",
-    "heisetasse beve": "Third Wave Coffee",
+_KNOWN_MERCHANTS = {
+    "bundl techn": "Swiggy",        "bundltech": "Swiggy",
+    "internet pvt": "Swiggy",       "heisetasse beve": "Third Wave Coffee",
     "heisetasse beverages": "Third Wave Coffee",
-    "zomato": "Zomato",
-    "blinkit": "Blinkit",
-    "grofers": "Blinkit",
-    "zepto": "Zepto",
-    "bigbasket": "BigBasket",
-    "dunzo": "Dunzo",
-    "swiggy instamart": "Swiggy Instamart",
-    "urbancompany": "Urban Company",
-    "urbanclap": "Urban Company",
-    "rentomojo": "RentoMojo",
-    "curefit": "Cult.fit",
-    "cultfit": "Cult.fit",
-    "practo": "Practo",
-    "pharmeasy": "PharmEasy",
-    "netmeds": "Netmeds",
-    "1mg": "1mg",
-    "apolloph": "Apollo Pharmacy",
-    "bookmysh": "BookMyShow",
-    "pvr cinema": "PVR Cinemas",
-    "inox": "INOX Cinemas",
-    "makemytrip": "MakeMyTrip",
-    "goibibo": "Goibibo",
-    "cleartrip": "Cleartrip",
-    "redbus": "RedBus",
-    "irctc": "Indian Railways",
-    "olacabs": "Ola Cabs",
-    "rapido": "Rapido",
-    "meesho": "Meesho",
-    "nykaa": "Nykaa",
-    "ajio": "AJIO",
-    "tatacliq": "Tata CLiQ",
-    "jiomart": "JioMart",
-    "phonepe": "PhonePe",
-    "paytm": "Paytm",
-    "gpay": "Google Pay",
-    "amazon pay": "Amazon",
+    "zomato": "Zomato",             "blinkit": "Blinkit",
+    "grofers": "Blinkit",           "zepto": "Zepto",
+    "bigbasket": "BigBasket",       "dunzo": "Dunzo",
+    "urbancompany": "Urban Company","urbanclap": "Urban Company",
+    "curefit": "Cult.fit",          "cultfit": "Cult.fit",
+    "pharmeasy": "PharmEasy",       "netmeds": "Netmeds",
+    "apolloph": "Apollo Pharmacy",  "bookmysh": "BookMyShow",
+    "pvr cinema": "PVR Cinemas",    "inox": "INOX Cinemas",
+    "makemytrip": "MakeMyTrip",     "goibibo": "Goibibo",
+    "cleartrip": "Cleartrip",       "redbus": "RedBus",
+    "irctc": "Indian Railways",     "olacabs": "Ola Cabs",
+    "rapido": "Rapido",             "meesho": "Meesho",
+    "nykaa": "Nykaa",               "ajio": "AJIO",
+    "tatacliq": "Tata CLiQ",        "jiomart": "JioMart",
+    "amazon pay": "Amazon",         "rentomojo": "RentoMojo",
 }
 
 
-def _ddg_html_search(query: str) -> list[str]:
-    """DuckDuckGo HTML search — returns top result snippets."""
-    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+def _mca21_search(query: str) -> list[str]:
+    """Query MCA21 company registry — free, official Indian govt database."""
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+        url = (
+            "https://efiling.mca.gov.in/CompanySearch/company"
+            f"?company_name={urllib.parse.quote(query)}&category=&class=&state=&status=&page=0&limit=5"
         )
-        with urllib.request.urlopen(req, timeout=8) as r:
-            html = r.read().decode("utf-8", errors="ignore")
-        import re as _re
-        snippets = _re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, _re.DOTALL)
-        clean = [_re.sub(r"<[^>]+>", "", s).replace("&#x27;", "'").strip() for s in snippets[:3]]
-        return [s for s in clean if s]
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=8,
+        )
+        data = resp.json()
+        return [c.get("company_name", "") for c in data.get("companies", []) if c.get("company_name")]
     except Exception:
         return []
 
 
-def lookup_merchant(api_key: str, merchant_code: str) -> tuple[str, str]:
-    """
-    Resolve a cryptic UPI merchant code to a real business name.
-    Returns (resolved_name, source) where source is one of:
-      'known' | 'web' | 'ai' | 'original'
-    """
-    code_lower = merchant_code.strip().lower()
+def _serper_search(serper_key: str, query: str) -> list[str]:
+    """Google search via Serper API (~$0.001/query). Returns top snippets."""
+    try:
+        resp = requests.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
+            json={"q": query, "num": 3, "gl": "in", "hl": "en"},
+            timeout=8,
+        )
+        results = resp.json().get("organic", [])
+        return [r.get("snippet", "") for r in results if r.get("snippet")]
+    except Exception:
+        return []
 
-    # 1. Local dictionary — instant
-    for key, name in _KNOWN_MERCHANTS.items():
-        if key in code_lower:
-            return name, "known"
 
-    # 2. DuckDuckGo HTML search
-    snippets = _ddg_html_search(f"{merchant_code} India UPI merchant company")
-    if snippets:
-        combined = " | ".join(snippets[:2])
-        # Ask AI to pull the brand name out of the search snippets
-        prompt = f"""Extract the real brand/business name for this Indian UPI merchant code.
+def _ddg_html_search(query: str) -> list[str]:
+    """DuckDuckGo HTML search — free fallback."""
+    try:
+        resp = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', resp.text, re.DOTALL)
+        return [re.sub(r"<[^>]+>", "", s).replace("&#x27;", "'").strip() for s in snippets[:3]]
+    except Exception:
+        return []
+
+
+def _ai_extract_name(api_key: str, merchant_code: str, context: str) -> str:
+    """Ask AI to pull a clean brand name from search context."""
+    prompt = f"""Extract the real Indian brand/business name for this UPI merchant code.
 
 Merchant code: {merchant_code}
-Web search results: {combined[:400]}
+Context: {context[:500]}
 
 Rules:
-- Return ONLY the short brand name (1-4 words), e.g. "Third Wave Coffee" or "Swiggy"
-- If the snippet mentions "popularly known as X" or "also known as X", use X
-- If genuinely unclear, return the original code
+- Return ONLY the short brand name (1-5 words), e.g. "Third Wave Coffee" or "Swiggy"
+- Prefer the popular brand name over the legal company name
+- If the context says "popularly known as X", use X
+- If unclear, reply: Unknown
 
-Reply with ONLY the brand name, nothing else."""
-        try:
-            name = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=15).strip()
-            name = name.strip('"').strip("'")
-            if name and name.lower() not in ("unknown", "none", code_lower) and len(name) < 50:
-                return name, "web"
-        except Exception:
-            pass  # fall through to AI-only reasoning
-
-    # 3. AI reasoning from the code name alone
-    prompt = f"""Decode this cryptic Indian UPI/bank merchant code into a real business name.
-
-Merchant code: "{merchant_code}"
-
-Known examples:
-- BUNDL TECHN → Swiggy (food delivery)
-- HEISETASSE BEVE → Third Wave Coffee ("Heiße Tasse" = hot cup in German)
-- INTERNET PVT → Swiggy
-- ZOMATO INDIA → Zomato
-
-What business is "{merchant_code}"? Reply with ONLY the business name (2-5 words).
-If you have no idea, reply: Unknown"""
+Reply with ONLY the brand name."""
     try:
-        name = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=15).strip()
-        name = name.strip('"').strip("'")
+        name = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=15).strip().strip('"\'')
+        return name if name and name.lower() != "unknown" and len(name) < 60 else ""
+    except Exception:
+        return ""
+
+
+def lookup_merchant(api_key: str, merchant_code: str, serper_key: str = "") -> tuple:
+    """
+    Resolve a cryptic UPI/bank merchant code to a real business name.
+
+    Lookup chain:
+      1. Local dict        — instant, no network
+      2. SQLite cache      — instant, from prior lookups
+      3. MCA21 portal      — free Indian govt company registry
+      4. Serper API        — Google search ($0.001/query, needs key)
+      5. DuckDuckGo HTML   — free web search fallback
+      6. AI reasoning      — pattern decode from the code name alone
+      7. Original code     — give up gracefully
+
+    Returns (resolved_name, source).
+    """
+    import database as _db
+
+    code_lower = merchant_code.strip().lower()
+
+    # 1. Local dict
+    for key, name in _KNOWN_MERCHANTS.items():
+        if key in code_lower:
+            return name, "local"
+
+    # 2. SQLite cache
+    cached = _db.get_cached_merchant(merchant_code)
+    if cached:
+        return cached[0], f"cache ({cached[1]})"
+
+    # Helper: extract + cache result
+    def _resolve(name: str, source: str) -> tuple:
+        if name:
+            _db.cache_merchant(merchant_code, name, source)
+        return (name or merchant_code), source
+
+    # 3. MCA21 — official company registry
+    mca_results = _mca21_search(merchant_code)
+    if mca_results:
+        # MCA returns official legal names; ask AI to get the popular brand name
+        context = " | ".join(mca_results[:3])
+        name = _ai_extract_name(api_key, merchant_code, context)
+        if not name:
+            # Use the first MCA result directly, trimmed to brand
+            name = mca_results[0].replace(" PRIVATE LIMITED", "").replace(" LIMITED", "").title()
+        return _resolve(name, "mca21")
+
+    # 4. Serper — Google search
+    if serper_key:
+        snippets = _serper_search(serper_key, f"{merchant_code} India UPI merchant company brand")
+        if snippets:
+            name = _ai_extract_name(api_key, merchant_code, " | ".join(snippets))
+            if name:
+                return _resolve(name, "serper")
+
+    # 5. DuckDuckGo HTML
+    snippets = _ddg_html_search(f"{merchant_code} India UPI merchant company")
+    if snippets:
+        name = _ai_extract_name(api_key, merchant_code, " | ".join(snippets))
+        if name:
+            return _resolve(name, "ddg")
+
+    # 6. AI reasoning alone
+    prompt = f"""Decode this cryptic Indian UPI merchant code into a real business name.
+Code: "{merchant_code}"
+Examples: BUNDL TECHN=Swiggy, HEISETASSE BEVE=Third Wave Coffee, ZOMATO INDIA=Zomato
+Reply with ONLY the business name (2-5 words) or "Unknown"."""
+    try:
+        name = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=15).strip().strip('"\'')
         if name and name.lower() != "unknown":
-            return name, "ai"
+            return _resolve(name, "ai")
     except Exception:
         pass
 
