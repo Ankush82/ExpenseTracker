@@ -10,9 +10,9 @@ from openai import OpenAI
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 # Model used for text tasks (fast + cheap)
-TEXT_MODEL = "anthropic/claude-3.5-haiku-20241022"
+TEXT_MODEL = "anthropic/claude-3.5-haiku"
 # Model used for vision and long-form advice
-VISION_MODEL = "anthropic/claude-3.5-sonnet-20241022"
+VISION_MODEL = "anthropic/claude-sonnet-4.6"
 
 CATEGORIES = [
     "Food & Dining",
