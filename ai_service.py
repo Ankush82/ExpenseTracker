@@ -9,9 +9,9 @@ from openai import OpenAI
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-# Free models on OpenRouter (no credits needed)
-TEXT_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
-VISION_MODEL = "meta-llama/llama-3.2-11b-vision-instruct:free"
+# Free models on OpenRouter (verified from /api/v1/models — no credits needed)
+TEXT_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+VISION_MODEL = "google/gemma-4-26b-a4b-it:free"
 
 CATEGORIES = [
     "Food & Dining",
@@ -190,7 +190,7 @@ Keep the total response under 400 words."""
 
     try:
         resp = _client(api_key).chat.completions.create(
-            model=VISION_MODEL,
+            model=TEXT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=400,
         )
