@@ -3,16 +3,14 @@
 import base64
 import json
 import re
-from typing import Optional  # noqa: F401 — used in type hints
+from typing import Optional  # noqa: F401
 
 from openai import OpenAI
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-# Free models on OpenRouter (verified from /api/v1/models — no credits needed)
 TEXT_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 
-# All free vision-capable models — tried in order on rate limit / error
 FREE_VISION_MODELS = [
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",
@@ -35,17 +33,117 @@ CATEGORIES = [
     "Other",
 ]
 
+# ---------------------------------------------------------------------------
+# Rule-based merchant → category lookup (runs before AI, zero API calls)
+# Keys are lowercase substrings matched against merchant + description text.
+# ---------------------------------------------------------------------------
+_RULES: list[tuple[list[str], str]] = [
+    # Food & Dining
+    (["swiggy", "bundl techn", "bundltech", "zomato", "mcdonalds", "mcd", "kfc",
+      "dominos", "pizza hut", "subway", "burger king", "starbucks", "cafe",
+      "restaurant", "biryani", "dhaba", "canteen", "foodpanda", "eatsure",
+      "dunzo food", "rebel foods", "faasos", "box8",
+      "coca-cola", "pepsi", "coke", "juice", "beverage", "drink",
+      "snack", "biscuit", "chips", "maggi", "noodle", "bread", "milk",
+      "chocolate", "candy", "ice cream", "dairy"], "Food & Dining"),
+
+    # Groceries
+    (["blinkit", "blnkt", "zepto", "bigbasket", "big basket", "grofers",
+      "jiomart", "dmart", "reliance fresh", "more supermarket", "nature basket",
+      "spencer", "easyday", "spar", "hypercity", "lulu"], "Groceries"),
+
+    # Travel & Transport
+    (["ola cabs", "olacabs", "olaelectric", "uber", "rapido", "irctc", "indian railway", "air india", "indigo",
+      "spicejet", "vistara", "goair", "akasa", "makemytrip", "mmt", "goibibo",
+      "redbus", "cleartrip", "yatra", "metro", "bmtc", "apsrtc", "gsrtc",
+      "petrol", "diesel", "fuel", "hp petrol", "iocl", "bpcl", "shell",
+      "fasttag", "toll"], "Travel & Transport"),
+
+    # Shopping
+    (["amazon", "flipkart", "myntra", "ajio", "nykaa", "meesho", "snapdeal",
+      "shopsy", "tatacliq", "reliancedigital", "croma", "vijay sales",
+      "trends", "westside", "zara", "h&m", "pantaloons", "lifestyle",
+      "max fashion", "shoppers stop"], "Shopping"),
+
+    # Entertainment
+    (["netflix", "nflx", "spotify", "prime video", "hotstar", "disney",
+      "zee5", "sonyliv", "bookmyshow", "pvr", "inox", "cinepolis",
+      "youtube premium", "apple music", "gaana", "jiosaavn", "wynk",
+      "loot", "gaming", "playstation", "xbox", "steam"], "Entertainment"),
+
+    # Bills & EMI
+    (["emi", "ach d", "nach", "loan", "equated", "hdfc bk loan", "lic ",
+      "insurance", "bajaj finserv", "home loan", "car loan", "credit card",
+      "nach debit", "mandate", "auto debit", "ecs"], "Bills & EMI"),
+
+    # Utilities
+    (["electricity", "bescom", "msedcl", "tata power", "adani electricity",
+      "tneb", "bses", "cesc", "water", "gas", "piped gas", "indane",
+      "hp gas", "bharat gas", "airtel", "jio", "bsnl", "vodafone", "vi ",
+      "broadband", "internet", "postpaid", "prepaid recharge", "tata sky",
+      "dish tv", "d2h", "sun direct"], "Utilities"),
+
+    # Healthcare
+    (["apollo", "fortis", "medplus", "practo", "1mg", "pharmeasy", "netmeds",
+      "hospital", "clinic", "pharmacy", "chemist", "medicine", "diagnostic",
+      "thyrocare", "dr lal", "healthians", "dentist", "optician",
+      "health insurance", "max hospital", "aiims"], "Healthcare"),
+
+    # Sports & Fitness
+    (["decathlon", "cult.fit", "cultfit", "gymshark", "gym", "fitness",
+      "sports", "swim", "cricket", "football", "badminton", "tennis",
+      "yoga", "zumba", "crossfit", "gold gym", "anytime fitness",
+      "nike", "adidas", "puma", "reebok", "asics", "new balance",
+      "swimming cap", "dumbbell", "protein", "whey"], "Sports & Fitness"),
+
+    # Personal Care
+    (["salon", "haircut", "parlour", "parlor", "nykaa fashion", "mamaearth",
+      "wow skin", "plum", "minimalist", "sugar cosmetics", "lakme",
+      "lotus", "biotique", "himalaya", "urban company", "urbanclap",
+      "grooming", "spa", "massage"], "Personal Care"),
+
+    # Indulgence
+    (["bar ", "pub ", "alcohol", "beer", "wine", "whisky", "liquor",
+      "luxury", "jewellery", "jewelry", "tanishq", "malabar", "kalyan",
+      "gold", "diamond", "watch", "rolex", "coach", "gucci", "louis vuitton",
+      "armani", "versace"], "Indulgence"),
+]
+
+
+def rule_based_category(merchant: str, description: str = "") -> Optional[str]:
+    """Return a category if any keyword rule matches, else None."""
+    text = " " + (merchant + " " + description).lower() + " "
+    for keywords, category in _RULES:
+        for kw in keywords:
+            # Short keywords (<=4 chars) need word boundaries to avoid false hits
+            if len(kw) <= 4:
+                if re.search(r"\b" + re.escape(kw.strip()) + r"\b", text):
+                    return category
+            elif kw in text:
+                return category
+    return None
+
 
 def _client(api_key: str) -> OpenAI:
     return OpenAI(base_url=OPENROUTER_BASE, api_key=api_key)
 
 
 def _extract_json(text: str) -> dict:
-    """Pull first JSON object from a model response."""
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if m:
         return json.loads(m.group())
     raise ValueError("No JSON found in response")
+
+
+def _match_category(raw: str) -> str:
+    """Fuzzy-match a model's reply to a valid category."""
+    raw = raw.strip().strip('"').strip("'")
+    if raw in CATEGORIES:
+        return raw
+    for cat in CATEGORIES:
+        if cat.lower() in raw.lower() or raw.lower() in cat.lower():
+            return cat
+    return "Other"
 
 
 # ---------------------------------------------------------------------------
@@ -59,15 +157,31 @@ def categorize_transaction(
     description: str = "",
     bank: str = "",
 ) -> str:
-    """Return one of the CATEGORIES for a given transaction."""
-    prompt = f"""You are an expense categoriser for Indian users.
-Classify this bank transaction into exactly one of these categories:
-{', '.join(CATEGORIES)}
+    # 1. Rule-based — instant, no API call
+    rule = rule_based_category(merchant, description)
+    if rule:
+        return rule
+
+    # 2. AI fallback with a richer, few-shot prompt
+    cat_list = "\n".join(f"- {c}" for c in CATEGORIES)
+    prompt = f"""You categorise Indian bank transactions. Pick exactly one category from this list:
+{cat_list}
+
+Examples:
+- "BUNDL TECHN" → Food & Dining  (Swiggy)
+- "ZOMATO" → Food & Dining
+- "BLINKIT" → Groceries
+- "UBER" → Travel & Transport
+- "NETFLIX" → Entertainment
+- "ACH D EMI" → Bills & EMI
+- "BESCOM" → Utilities
+- "APOLLO PHARMACY" → Healthcare
+- "DECATHLON" → Sports & Fitness
 
 Transaction:
-- Merchant / Description: {merchant or description}
-- Amount: INR {amount:,.2f}
-- Bank info: {bank}
+Merchant: {merchant or description}
+Amount: INR {amount:,.2f}
+Bank note: {bank}
 
 Reply with ONLY the category name, nothing else."""
 
@@ -75,39 +189,41 @@ Reply with ONLY the category name, nothing else."""
         resp = _client(api_key).chat.completions.create(
             model=TEXT_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=30,
+            max_tokens=20,
         )
-        raw = resp.choices[0].message.content.strip()
-        # Exact match first
-        if raw in CATEGORIES:
-            return raw
-        # Partial match
-        for cat in CATEGORIES:
-            if cat.lower() in raw.lower() or raw.lower() in cat.lower():
-                return cat
-        return "Other"
+        return _match_category(resp.choices[0].message.content)
     except Exception:
         return "Other"
 
 
 def categorize_item(api_key: str, item_name: str) -> str:
-    """Categorise a single line item from a receipt."""
-    prompt = f"""Categorise this item into one of: {', '.join(CATEGORIES)}
+    """Categorise a single receipt line item."""
+    # Rule-based first
+    rule = rule_based_category(item_name)
+    if rule:
+        return rule
+
+    cat_list = ", ".join(CATEGORIES)
+    prompt = f"""Categorise this item into one of: {cat_list}
+
+Examples:
+- "Coca-Cola Diet Coke" → Food & Dining
+- "Swimming Cap" → Sports & Fitness
+- "Protein powder" → Sports & Fitness
+- "Shampoo" → Personal Care
+- "Laptop bag" → Shopping
+- "Paracetamol" → Healthcare
+
 Item: {item_name}
 Reply with ONLY the category name."""
+
     try:
         resp = _client(api_key).chat.completions.create(
             model=TEXT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=20,
         )
-        raw = resp.choices[0].message.content.strip()
-        if raw in CATEGORIES:
-            return raw
-        for cat in CATEGORIES:
-            if cat.lower() in raw.lower():
-                return cat
-        return "Other"
+        return _match_category(resp.choices[0].message.content)
     except Exception:
         return "Other"
 
@@ -117,21 +233,21 @@ Reply with ONLY the category name."""
 # ---------------------------------------------------------------------------
 
 def extract_from_screenshot(api_key: str, image_bytes: bytes, mime: str = "image/jpeg") -> dict:
-    """
-    Try each free vision model in turn. Returns on first success.
-    Falls back gracefully if all models are rate-limited.
-    """
+    """Try each free vision model in turn; return on first success."""
     b64 = base64.b64encode(image_bytes).decode()
 
-    prompt = """Analyse this payment / order screenshot and extract as JSON:
+    prompt = """You are extracting data from an Indian payment or order screenshot.
+Return ONLY a JSON object — no markdown, no explanation:
 {
-  "merchant": "<app or store name>",
-  "total_amount": <final bill amount as a number>,
+  "merchant": "<app or store name, e.g. Blinkit, Swiggy, Amazon>",
+  "total_amount": <final amount paid, as a plain number>,
   "date": "<YYYY-MM-DD if visible, else null>",
-  "items": [{"name": "<item>", "quantity": "<qty>", "price": <number>}]
+  "items": [
+    {"name": "<item name>", "quantity": "<e.g. 1x or 180ml x 3>", "price": <number>}
+  ]
 }
-List every line item. Use the final bill total for total_amount.
-Reply with ONLY valid JSON, no markdown."""
+Use the final bill total (after discounts) for total_amount.
+List every individual item you can see."""
 
     messages = [
         {
@@ -151,11 +267,13 @@ Reply with ONLY valid JSON, no markdown."""
                 messages=messages,
                 max_tokens=400,
             )
-            return _extract_json(resp.choices[0].message.content)
+            result = _extract_json(resp.choices[0].message.content)
+            # Auto-categorise each item using rules before returning
+            for item in result.get("items", []):
+                item["category"] = categorize_item(api_key, item.get("name", ""))
+            return result
         except Exception as e:
             last_error = str(e)
-            # 429 = rate limited, 404 = model gone — try next
-            # Any other error also falls through to next model
             continue
 
     return {
@@ -163,7 +281,7 @@ Reply with ONLY valid JSON, no markdown."""
         "total_amount": 0.0,
         "date": None,
         "items": [],
-        "error": f"All vision models failed. Last error: {last_error}",
+        "error": f"All vision models failed. Last: {last_error}",
     }
 
 
@@ -182,14 +300,13 @@ def get_financial_advice(
 {user_name}'s spending summary for {period_label}:
 {spending_summary}
 
-Provide a concise analysis with these sections:
-1. **Overall Assessment** (2-3 sentences on overall spending health)
-2. **Top Spending Areas** (call out the biggest categories and whether they seem reasonable)
-3. **3 Actionable Tips** to reduce spending, specific to the data above
-4. **Estimated Monthly Savings Potential** if tips are followed
+Write a short analysis with these sections:
+1. **Overall Assessment** (2-3 sentences)
+2. **Top Spending Areas** (biggest categories, are they reasonable?)
+3. **3 Actionable Tips** specific to this data
+4. **Estimated Monthly Savings** if tips are followed
 
-Be warm, specific, and non-judgmental. Use INR amounts where relevant.
-Keep the total response under 400 words."""
+Be specific, practical, use INR amounts. Under 350 words."""
 
     try:
         resp = _client(api_key).chat.completions.create(
