@@ -464,7 +464,7 @@ SMS:
         return None
 
 
-def parse_multiple_sms(bulk_text: str, api_key: str = "") -> list[dict]:
+def parse_multiple_sms(bulk_text: str, api_key: str = "") -> list:
     """Split a block of pasted SMS messages and parse each one."""
     # Split on double newlines first
     messages = re.split(r"\n{2,}", bulk_text.strip())
