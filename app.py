@@ -240,11 +240,11 @@ def show_dashboard():
         fig_user.update_layout(showlegend=False, margin=dict(t=0, b=0, l=0, r=0))
         st.plotly_chart(fig_user, use_container_width=True)
 
-    # Monthly category heatmap-style table
+    # Category breakdown table
     st.subheader("Category Breakdown")
     pivot = df.groupby(["date", "category"])["amount"].sum().unstack(fill_value=0)
     st.dataframe(
-        pivot.style.format("₹{:,.0f}").background_gradient(cmap="YlOrRd", axis=None),
+        pivot.style.format("₹{:,.0f}"),
         use_container_width=True,
     )
 
