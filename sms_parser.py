@@ -166,22 +166,40 @@ def _try_sbi_upi(text: str) -> Optional[dict]:
 
 def _try_icici(text: str) -> Optional[dict]:
     """
-    ICICI Bank Acct XX1234 debited for Rs 500.00 on 20-May-2026; ... trf to MERCHANT
+    Handles multiple ICICI formats:
+    1. ICICI Bank Acct XX791 debited for Rs 502.99 on 20-May-26; HEISETASSE BEVE credited.
+    2. ICICI Bank Acct XX1234 debited for Rs 500.00 on 20-May-2026; ... trf to MERCHANT
     """
+    # Extract amount and date first
     m = re.search(
-        r"ICICI Bank.*?debited for Rs\.?\s*([\d,]+(?:\.\d+)?)\s+on\s+(\d{2}-[A-Za-z]+-\d{2,4}).*?(?:trf to|at)\s+(.+?)(?:;|\.|$)",
+        r"ICICI Bank.*?debited for Rs\.?\s*([\d,]+(?:\.\d+)?)\s+on\s+(\d{2}-[A-Za-z]+-\d{2,4})",
         text, re.IGNORECASE
     )
-    if m:
-        desc = m.group(3).strip()
-        return {
-            "amount": _parse_amount(m.group(1)),
-            "date": _normalize_date(m.group(2)),
-            "merchant": desc,
-            "description": desc,
-            "bank": "ICICI Bank",
-        }
-    return None
+    if not m:
+        return None
+
+    amount = _parse_amount(m.group(1))
+    date = _normalize_date(m.group(2))
+    rest = text[m.end():]
+
+    # Try: "; MERCHANT credited" or "; MERCHANT UPI"
+    merchant_m = re.search(r";\s*(.+?)\s+(?:credited|UPI:|debited|Call)", rest, re.IGNORECASE)
+    if not merchant_m:
+        # Try: "trf to MERCHANT" or "at MERCHANT"
+        merchant_m = re.search(r"(?:trf to|at)\s+(.+?)(?:;|\.|$)", rest, re.IGNORECASE)
+    if not merchant_m:
+        # Use whatever comes after the semicolon
+        merchant_m = re.search(r";\s*([A-Z][A-Za-z0-9 &\-_]{2,40})", rest)
+
+    merchant = merchant_m.group(1).strip() if merchant_m else "ICICI Transaction"
+
+    return {
+        "amount": amount,
+        "date": date,
+        "merchant": merchant,
+        "description": merchant,
+        "bank": "ICICI Bank",
+    }
 
 
 def _try_kotak(text: str) -> Optional[dict]:
@@ -225,13 +243,30 @@ def _try_generic_inr_debited(text: str) -> Optional[dict]:
             "bank": "Unknown",
         }
 
-    # Pattern: debited Rs/INR X
+    # Pattern: debited for Rs X  (ICICI / generic)
+    m = re.search(
+        r"debited\s+for\s+Rs\.?\s*([\d,]+(?:\.\d+)?)\s+on\s+(\d{2}-[A-Za-z]+-\d{2,4})",
+        text, re.IGNORECASE
+    )
+    if m:
+        date = _normalize_date(m.group(2))
+        rest = text[m.end():]
+        merchant_m = re.search(r";\s*(.+?)\s+(?:credited|UPI:|Call)", rest, re.IGNORECASE)
+        merchant = merchant_m.group(1).strip() if merchant_m else "Unknown"
+        return {
+            "amount": _parse_amount(m.group(1)),
+            "date": date,
+            "merchant": merchant,
+            "description": text[:120],
+            "bank": "Unknown",
+        }
+
+    # Pattern: debited Rs/INR X (loose)
     m = re.search(
         r"debited\s+(?:Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)",
         text, re.IGNORECASE
     )
     if m:
-        # Try to find a date
         date_m = re.search(r"(\d{2}[-/]\d{2}[-/]\d{2,4}|\d{2}-[A-Za-z]{3}-\d{2,4})", text)
         date = _normalize_date(date_m.group(1)) if date_m else datetime.today().strftime("%Y-%m-%d")
         merchant_m = re.search(r"(?:for|to|at|UPI-)\s*([A-Za-z][\w\s\-@.]{2,40})", text)
@@ -273,11 +308,11 @@ def is_debit_sms(text: str) -> bool:
     return has_debit and not has_credit_only
 
 
-def parse_sms(text: str) -> Optional[dict]:
+def parse_sms(text: str, api_key: str = "", use_ai: bool = True) -> Optional[dict]:
     """
-    Parse a single SMS string. Returns a dict with keys:
-      amount, merchant, date, description, bank
-    or None if not a recognisable debit SMS.
+    Parse a single SMS. Falls back to AI if no regex matches.
+    Returns dict with keys: amount, merchant, date, description, bank
+    or None if not a debit SMS.
     """
     if not is_debit_sms(text):
         return None
@@ -288,18 +323,51 @@ def parse_sms(text: str) -> Optional[dict]:
             result["raw_text"] = text
             return result
 
+    # AI fallback — only if a key is available
+    if use_ai and api_key:
+        return _parse_sms_with_ai(text, api_key)
+
     return None
 
 
-def parse_multiple_sms(bulk_text: str) -> list[dict]:
+def _parse_sms_with_ai(text: str, api_key: str) -> Optional[dict]:
+    """Use the text LLM to extract fields from an unrecognised SMS format."""
+    # Import here to avoid circular import
+    from ai_service import _chat
+    prompt = f"""Extract debit transaction details from this Indian bank SMS.
+Return ONLY valid JSON, nothing else:
+{{"amount": <number>, "date": "YYYY-MM-DD", "merchant": "<payee name>", "bank": "<bank name>"}}
+
+Rules:
+- amount: the rupee amount debited (number, no commas)
+- date: convert any date format to YYYY-MM-DD (e.g. 20-May-26 → 2026-05-20)
+- merchant: the business/payee name (not the bank)
+- bank: the bank that sent the SMS
+
+SMS: {text}"""
+    try:
+        raw = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=80)
+        import json as _json
+        data = _json.loads(re.search(r"\{.*\}", raw, re.DOTALL).group())
+        return {
+            "amount": float(data["amount"]),
+            "date": str(data.get("date", datetime.today().strftime("%Y-%m-%d"))),
+            "merchant": str(data.get("merchant", "Unknown")),
+            "description": str(data.get("merchant", "Unknown")),
+            "bank": str(data.get("bank", "Unknown")),
+            "raw_text": text,
+        }
+    except Exception:
+        return None
+
+
+def parse_multiple_sms(bulk_text: str, api_key: str = "") -> list[dict]:
     """
     Split a block of pasted SMS messages and parse each one.
     Returns list of parsed debit transactions.
     """
-    # Split on blank lines or lines starting with common bank names / UPDATE
     messages = re.split(r"\n{2,}", bulk_text.strip())
 
-    # If no blank-line separation, try splitting on sentence patterns
     if len(messages) == 1:
         messages = re.split(r"(?<=[.!?])\s+(?=[A-Z])", bulk_text)
 
@@ -308,7 +376,7 @@ def parse_multiple_sms(bulk_text: str) -> list[dict]:
         msg = msg.strip()
         if len(msg) < 20:
             continue
-        parsed = parse_sms(msg)
+        parsed = parse_sms(msg, api_key=api_key, use_ai=True)
         if parsed:
             results.append(parsed)
 

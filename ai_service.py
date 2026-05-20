@@ -3,6 +3,8 @@
 import base64
 import json
 import re
+import urllib.parse
+import urllib.request
 from typing import Optional  # noqa: F401
 
 from openai import OpenAI
@@ -169,6 +171,74 @@ def _match_category(raw: str) -> str:
         if cat.lower() in raw.lower() or raw.lower() in cat.lower():
             return cat
     return "Other"
+
+
+# ---------------------------------------------------------------------------
+# Merchant name lookup (cryptic UPI codes → real business names)
+# ---------------------------------------------------------------------------
+
+def _ddg_search(query: str) -> str:
+    """DuckDuckGo instant-answer API — free, no key needed."""
+    url = "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1".format(
+        urllib.parse.quote(query)
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read())
+        return (
+            data.get("Abstract")
+            or (data.get("RelatedTopics") or [{}])[0].get("Text", "")
+        )
+    except Exception:
+        return ""
+
+
+def lookup_merchant(api_key: str, merchant_code: str) -> str:
+    """
+    Resolve a cryptic merchant code to a real business name.
+    E.g. 'HEISETASSE BEVE' → 'Thirdwave Coffee'
+    1. DuckDuckGo instant answer
+    2. AI reasoning fallback
+    Returns the resolved name, or the original if nothing found.
+    """
+    # Skip lookup if it already looks like a real name
+    words = merchant_code.split()
+    if len(words) >= 2 and not merchant_code.isupper():
+        return merchant_code
+
+    # 1. DuckDuckGo
+    snippet = _ddg_search(f"{merchant_code} India merchant payment UPI")
+    if snippet and len(snippet) > 20:
+        # Ask AI to extract just the business name from the snippet
+        prompt = f"""Given this search result snippet about a payment merchant, extract ONLY the real business/brand name (1-4 words). If unclear, return the original code.
+
+Merchant code: {merchant_code}
+Search snippet: {snippet}
+
+Reply with ONLY the business name, nothing else."""
+        try:
+            name = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=15).strip()
+            if name and name.lower() not in ("unknown", "none", merchant_code.lower()):
+                return name
+        except Exception:
+            pass
+
+    # 2. AI reasoning alone
+    prompt = f"""This is a cryptic merchant code from an Indian bank/UPI payment SMS: "{merchant_code}"
+
+Common patterns: BUNDL TECHN = Swiggy, HEISETASSE BEVE = Thirdwave Coffee (German: hot cup + beverage).
+
+What real Indian business does "{merchant_code}" most likely refer to?
+Reply with ONLY the business name (2-5 words). If genuinely unknown, reply "Unknown"."""
+    try:
+        name = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=15).strip()
+        if name and name.lower() != "unknown":
+            return name
+    except Exception:
+        pass
+
+    return merchant_code
 
 
 # ---------------------------------------------------------------------------

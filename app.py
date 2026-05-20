@@ -286,9 +286,13 @@ def show_add_sms():
     )
 
     if st.button("Parse SMS", type="primary", disabled=not sms_text.strip()):
-        parsed = sms_parser.parse_multiple_sms(sms_text)
+        with st.spinner("Parsing…"):
+            parsed = sms_parser.parse_multiple_sms(sms_text, api_key=api_key())
         if not parsed:
-            st.error("No debit transactions detected. Make sure you pasted bank debit SMS messages.")
+            st.error(
+                "No debit transactions detected. "
+                "Tip: make sure the message contains words like 'debited' or 'spent'."
+            )
         else:
             st.session_state["parsed_sms"] = parsed
             st.success(f"Found {len(parsed)} debit transaction(s).")
@@ -305,9 +309,16 @@ def show_add_sms():
                 cols = st.columns([2, 1, 2, 2, 1])
 
                 with cols[0]:
-                    merchant = st.text_input(
-                        "Merchant", value=tx.get("merchant", ""), key=f"merchant_{i}"
-                    )
+                    default_merchant = st.session_state.get(f"merchant_resolved_{i}", tx.get("merchant", ""))
+                    merchant = st.text_input("Merchant", value=default_merchant, key=f"merchant_{i}")
+                    # Merchant lookup button
+                    if api_key() and st.button("🔍 Lookup", key=f"lookup_{i}",
+                                               help="Search who this merchant really is"):
+                        with st.spinner("Looking up merchant…"):
+                            resolved = ai_service.lookup_merchant(api_key(), merchant)
+                        st.session_state[f"merchant_resolved_{i}"] = resolved
+                        st.rerun()
+
                 with cols[1]:
                     amount = st.number_input(
                         "Amount (₹)", value=float(tx.get("amount", 0)), key=f"amount_{i}", min_value=0.0
@@ -319,7 +330,6 @@ def show_add_sms():
                         key=f"date_{i}",
                     )
                 with cols[3]:
-                    # Auto-categorise with AI if key is available
                     default_cat = "Other"
                     if api_key() and st.button(
                         "AI Categorise", key=f"ai_cat_{i}", help="Use AI to suggest a category"
