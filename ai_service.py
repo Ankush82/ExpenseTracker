@@ -9,7 +9,15 @@ from openai import OpenAI
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-TEXT_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+# Free text models — tried in order on rate limit
+FREE_TEXT_MODELS = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "deepseek/deepseek-v4-flash:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "openai/gpt-oss-120b:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+]
 
 FREE_VISION_MODELS = [
     "google/gemma-4-31b-it:free",
@@ -128,6 +136,23 @@ def _client(api_key: str) -> OpenAI:
     return OpenAI(base_url=OPENROUTER_BASE, api_key=api_key)
 
 
+def _chat(api_key: str, messages: list, max_tokens: int = 20) -> str:
+    """Call free text models in sequence until one responds."""
+    last_err = "No text models available"
+    for model in FREE_TEXT_MODELS:
+        try:
+            resp = _client(api_key).chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            last_err = str(e)
+            continue
+    raise RuntimeError(last_err)
+
+
 def _extract_json(text: str) -> dict:
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if m:
@@ -186,12 +211,7 @@ Bank note: {bank}
 Reply with ONLY the category name, nothing else."""
 
     try:
-        resp = _client(api_key).chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=20,
-        )
-        return _match_category(resp.choices[0].message.content)
+        return _match_category(_chat(api_key, [{"role": "user", "content": prompt}], max_tokens=20))
     except Exception:
         return "Other"
 
@@ -218,12 +238,7 @@ Item: {item_name}
 Reply with ONLY the category name."""
 
     try:
-        resp = _client(api_key).chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=20,
-        )
-        return _match_category(resp.choices[0].message.content)
+        return _match_category(_chat(api_key, [{"role": "user", "content": prompt}], max_tokens=20))
     except Exception:
         return "Other"
 
@@ -309,11 +324,6 @@ Write a short analysis with these sections:
 Be specific, practical, use INR amounts. Under 350 words."""
 
     try:
-        resp = _client(api_key).chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
-        )
-        return resp.choices[0].message.content
+        return _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=400)
     except Exception as e:
         return f"Could not generate advice: {e}"
