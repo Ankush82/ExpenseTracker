@@ -11,7 +11,14 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 # Free models on OpenRouter (verified from /api/v1/models — no credits needed)
 TEXT_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
-VISION_MODEL = "google/gemma-4-26b-a4b-it:free"
+
+# All free vision-capable models — tried in order on rate limit / error
+FREE_VISION_MODELS = [
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+]
 
 CATEGORIES = [
     "Food & Dining",
@@ -111,57 +118,53 @@ Reply with ONLY the category name."""
 
 def extract_from_screenshot(api_key: str, image_bytes: bytes, mime: str = "image/jpeg") -> dict:
     """
-    Send a payment screenshot to the vision model.
-    Returns:
-    {
-        "merchant": str,
-        "total_amount": float,
-        "date": str | null,
-        "items": [{"name": str, "quantity": str, "price": float}]
-    }
+    Try each free vision model in turn. Returns on first success.
+    Falls back gracefully if all models are rate-limited.
     """
     b64 = base64.b64encode(image_bytes).decode()
 
-    prompt = """Analyse this payment / order screenshot and extract the following as JSON:
+    prompt = """Analyse this payment / order screenshot and extract as JSON:
 {
   "merchant": "<app or store name>",
-  "total_amount": <final amount paid as a number>,
+  "total_amount": <final bill amount as a number>,
   "date": "<YYYY-MM-DD if visible, else null>",
-  "items": [
-    {"name": "<item name>", "quantity": "<e.g. 2x or 180ml x 3>", "price": <price as number>}
-  ]
+  "items": [{"name": "<item>", "quantity": "<qty>", "price": <number>}]
 }
+List every line item. Use the final bill total for total_amount.
+Reply with ONLY valid JSON, no markdown."""
 
-If the screenshot is from a delivery app like Blinkit, Swiggy, Zomato, Amazon etc., list every line item.
-Use the bill total / final amount for total_amount (after discounts).
-Respond with ONLY valid JSON, no markdown, no explanation."""
-
-    try:
-        resp = _client(api_key).chat.completions.create(
-            model=VISION_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime};base64,{b64}"},
-                        },
-                    ],
-                }
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
             ],
-            max_tokens=400,
-        )
-        return _extract_json(resp.choices[0].message.content)
-    except Exception as e:
-        return {
-            "merchant": "Unknown",
-            "total_amount": 0.0,
-            "date": None,
-            "items": [],
-            "error": str(e),
         }
+    ]
+
+    last_error = "No vision models available"
+    for model in FREE_VISION_MODELS:
+        try:
+            resp = _client(api_key).chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=400,
+            )
+            return _extract_json(resp.choices[0].message.content)
+        except Exception as e:
+            last_error = str(e)
+            # 429 = rate limited, 404 = model gone — try next
+            # Any other error also falls through to next model
+            continue
+
+    return {
+        "merchant": "Unknown",
+        "total_amount": 0.0,
+        "date": None,
+        "items": [],
+        "error": f"All vision models failed. Last error: {last_error}",
+    }
 
 
 # ---------------------------------------------------------------------------
