@@ -282,7 +282,108 @@ def _try_generic_inr_debited(text: str) -> Optional[dict]:
     return None
 
 
+def _try_upi_mandate(text: str) -> Optional[dict]:
+    """
+    UPI Mandate / UPI payment multi-line format:
+      UPI Mandate:
+      Sent Rs.179.00
+      from HDFC Bank A/c 7750
+      To Spotify India Pvt Ltd
+      19/04/26
+    Also handles single-line variants like:
+      UPI: Sent Rs.500 to Merchant on 20/05/26
+    """
+    # Collapse multi-line to single line for easier regex
+    flat = " ".join(text.split())
+
+    # Multi-line UPI Mandate: Sent Rs.X ... To MERCHANT ... DD/MM/YY
+    m = re.search(
+        r"Sent Rs\.?\s*([\d,]+(?:\.\d+)?)\s+from\s+.+?To\s+(.+?)\s+(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        flat, re.IGNORECASE
+    )
+    if m:
+        return {
+            "amount": _parse_amount(m.group(1)),
+            "merchant": m.group(2).strip(),
+            "description": m.group(2).strip(),
+            "date": _normalize_date(m.group(3).replace("/", "-")),
+            "bank": _extract_bank(flat),
+        }
+
+    # Sent Rs.X to MERCHANT on DATE
+    m = re.search(
+        r"Sent Rs\.?\s*([\d,]+(?:\.\d+)?)\s+to\s+(.+?)\s+(?:on\s+)?(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        flat, re.IGNORECASE
+    )
+    if m:
+        return {
+            "amount": _parse_amount(m.group(1)),
+            "merchant": m.group(2).strip(),
+            "description": m.group(2).strip(),
+            "date": _normalize_date(m.group(3).replace("/", "-")),
+            "bank": _extract_bank(flat),
+        }
+
+    # Sent Rs.X to MERCHANT (no explicit date — use today)
+    m = re.search(
+        r"Sent Rs\.?\s*([\d,]+(?:\.\d+)?)\s+to\s+(.+?)(?:\s+Ref|\s+Not You|\s+$)",
+        flat, re.IGNORECASE
+    )
+    if m:
+        date_m = re.search(r"(\d{2}[/-]\d{2}[/-]\d{2,4})", flat)
+        date = _normalize_date(date_m.group(1).replace("/", "-")) if date_m else datetime.today().strftime("%Y-%m-%d")
+        return {
+            "amount": _parse_amount(m.group(1)),
+            "merchant": m.group(2).strip(),
+            "description": m.group(2).strip(),
+            "date": date,
+            "bank": _extract_bank(flat),
+        }
+
+    return None
+
+
+def _try_upi_generic(text: str) -> Optional[dict]:
+    """
+    Generic UPI payment messages:
+      Rs.X paid to MERCHANT via UPI on DD-MM-YYYY
+      You have paid Rs X to MERCHANT on DD/MM/YY
+      Payment of Rs X to MERCHANT successful
+    """
+    flat = " ".join(text.split())
+
+    patterns = [
+        r"(?:paid|transferred|debited)\s+(?:Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)\s+(?:to|for)\s+(.+?)\s+(?:via|on|through|Ref)",
+        r"You have paid\s+(?:Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)\s+to\s+(.+?)\s+on",
+        r"Payment of\s+(?:Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)\s+to\s+(.+?)\s+(?:successful|done|complete)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, flat, re.IGNORECASE)
+        if m:
+            date_m = re.search(r"(\d{2}[/-]\d{2}[/-]\d{2,4}|\d{2}-[A-Za-z]{3}-\d{2,4})", flat)
+            date = _normalize_date(date_m.group(1).replace("/", "-")) if date_m else datetime.today().strftime("%Y-%m-%d")
+            return {
+                "amount": _parse_amount(m.group(1)),
+                "merchant": m.group(2).strip(),
+                "description": m.group(2).strip(),
+                "date": date,
+                "bank": _extract_bank(flat),
+            }
+    return None
+
+
+def _extract_bank(text: str) -> str:
+    """Pull bank name from any SMS text."""
+    for bank in ["HDFC Bank", "Axis Bank", "SBI", "ICICI Bank", "Kotak Bank",
+                 "Yes Bank", "IDFC Bank", "IndusInd Bank", "Bank of Baroda", "PNB"]:
+        if bank.lower() in text.lower():
+            return bank
+    return "Unknown"
+
+
 _PARSERS = [
+    _try_upi_mandate,       # NEW — multi-line UPI Mandate format
+    _try_upi_generic,       # NEW — generic UPI paid/payment messages
     _try_axis_spent,
     _try_hdfc_debited,
     _try_hdfc_alert,
@@ -293,26 +394,28 @@ _PARSERS = [
     _try_generic_inr_debited,
 ]
 
-# Keywords that indicate a debit (not credit/OTP/balance)
+# Debit signal — broad enough to catch "Sent Rs.", "mandate", "UPI", etc.
 _DEBIT_KEYWORDS = re.compile(
-    r"\b(debited|spent|debit|withdrawn|purchase|payment|paid|charged)\b", re.IGNORECASE
+    r"\b(debited|spent|debit|withdrawn|purchase|payment|paid|charged|sent\s+rs|mandate|transferred|auto.?debit)\b",
+    re.IGNORECASE
 )
-_CREDIT_KEYWORDS = re.compile(
+_CREDIT_ONLY_KEYWORDS = re.compile(
     r"\b(credited|received|deposit|refund|cashback|OTP|password)\b", re.IGNORECASE
 )
 
 
 def is_debit_sms(text: str) -> bool:
     has_debit = bool(_DEBIT_KEYWORDS.search(text))
-    has_credit_only = bool(_CREDIT_KEYWORDS.search(text)) and not has_debit
+    # Only reject if it's PURELY a credit message with no debit signal
+    has_credit_only = bool(_CREDIT_ONLY_KEYWORDS.search(text)) and not has_debit
     return has_debit and not has_credit_only
 
 
 def parse_sms(text: str, api_key: str = "", use_ai: bool = True) -> Optional[dict]:
     """
-    Parse a single SMS. Falls back to AI if no regex matches.
-    Returns dict with keys: amount, merchant, date, description, bank
-    or None if not a debit SMS.
+    1. Check if it looks like a debit message.
+    2. Try all regex parsers in order.
+    3. Fall back to AI for any format that slips through.
     """
     if not is_debit_sms(text):
         return None
@@ -323,7 +426,7 @@ def parse_sms(text: str, api_key: str = "", use_ai: bool = True) -> Optional[dic
             result["raw_text"] = text
             return result
 
-    # AI fallback — only if a key is available
+    # AI fallback — catches any format regex doesn't handle
     if use_ai and api_key:
         return _parse_sms_with_ai(text, api_key)
 
@@ -331,43 +434,42 @@ def parse_sms(text: str, api_key: str = "", use_ai: bool = True) -> Optional[dic
 
 
 def _parse_sms_with_ai(text: str, api_key: str) -> Optional[dict]:
-    """Use the text LLM to extract fields from an unrecognised SMS format."""
-    # Import here to avoid circular import
+    """Use the LLM to extract fields from any unrecognised SMS format."""
     from ai_service import _chat
-    prompt = f"""Extract debit transaction details from this Indian bank SMS.
-Return ONLY valid JSON, nothing else:
-{{"amount": <number>, "date": "YYYY-MM-DD", "merchant": "<payee name>", "bank": "<bank name>"}}
+    import json as _json
 
-Rules:
-- amount: the rupee amount debited (number, no commas)
-- date: convert any date format to YYYY-MM-DD (e.g. 20-May-26 → 2026-05-20)
-- merchant: the business/payee name (not the bank)
-- bank: the bank that sent the SMS
+    prompt = f"""Extract debit transaction details from this Indian bank/UPI SMS.
+Return ONLY valid JSON — no markdown, no explanation:
+{{"amount": <rupee amount as number>, "date": "YYYY-MM-DD", "merchant": "<business/payee name>", "bank": "<sending bank name>"}}
 
-SMS: {text}"""
+Date rules: 19/04/26 → 2026-04-19, 20-May-26 → 2026-05-20
+Merchant: the business being paid (NOT the bank). E.g. "Spotify India Pvt Ltd" → "Spotify India Pvt Ltd"
+
+SMS:
+{text}"""
     try:
-        raw = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=80)
-        import json as _json
+        raw = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=100)
         data = _json.loads(re.search(r"\{.*\}", raw, re.DOTALL).group())
+        merchant = str(data.get("merchant", "Unknown"))
         return {
             "amount": float(data["amount"]),
             "date": str(data.get("date", datetime.today().strftime("%Y-%m-%d"))),
-            "merchant": str(data.get("merchant", "Unknown")),
-            "description": str(data.get("merchant", "Unknown")),
+            "merchant": merchant,
+            "description": merchant,
             "bank": str(data.get("bank", "Unknown")),
             "raw_text": text,
+            "parsed_by": "ai",
         }
     except Exception:
         return None
 
 
 def parse_multiple_sms(bulk_text: str, api_key: str = "") -> list[dict]:
-    """
-    Split a block of pasted SMS messages and parse each one.
-    Returns list of parsed debit transactions.
-    """
+    """Split a block of pasted SMS messages and parse each one."""
+    # Split on double newlines first
     messages = re.split(r"\n{2,}", bulk_text.strip())
 
+    # If no blank lines, try splitting on sentence-end + capital letter
     if len(messages) == 1:
         messages = re.split(r"(?<=[.!?])\s+(?=[A-Z])", bulk_text)
 
@@ -376,7 +478,7 @@ def parse_multiple_sms(bulk_text: str, api_key: str = "") -> list[dict]:
         msg = msg.strip()
         if len(msg) < 20:
             continue
-        parsed = parse_sms(msg, api_key=api_key, use_ai=True)
+        parsed = parse_sms(msg, api_key=api_key, use_ai=bool(api_key))
         if parsed:
             results.append(parsed)
 
