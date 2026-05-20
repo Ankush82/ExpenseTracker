@@ -9,10 +9,9 @@ from openai import OpenAI
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-# Model used for text tasks (fast + cheap)
-TEXT_MODEL = "anthropic/claude-3.5-haiku"
-# Model used for vision and long-form advice
-VISION_MODEL = "anthropic/claude-sonnet-4.6"
+# Free models on OpenRouter (no credits needed)
+TEXT_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
+VISION_MODEL = "meta-llama/llama-3.2-11b-vision-instruct:free"
 
 CATEGORIES = [
     "Food & Dining",
@@ -152,7 +151,7 @@ Respond with ONLY valid JSON, no markdown, no explanation."""
                     ],
                 }
             ],
-            max_tokens=800,
+            max_tokens=400,
         )
         return _extract_json(resp.choices[0].message.content)
     except Exception as e:
@@ -193,7 +192,7 @@ Keep the total response under 400 words."""
         resp = _client(api_key).chat.completions.create(
             model=VISION_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=700,
+            max_tokens=400,
         )
         return resp.choices[0].message.content
     except Exception as e:
