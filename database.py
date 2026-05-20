@@ -104,7 +104,7 @@ def init_db():
     ]
     for uid, username, pwd_hash, display_name in default_users:
         c.execute(
-            "INSERT OR IGNORE INTO users (id, username, password_hash, display_name) VALUES (?,?,?,?)",
+            "INSERT OR REPLACE INTO users (id, username, password_hash, display_name) VALUES (?,?,?,?)",
             (uid, username, pwd_hash, display_name),
         )
 
