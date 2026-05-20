@@ -88,9 +88,10 @@ def init_db():
     """)
 
     default_users = [
-        (1, "user1", _hash("pass1"), "User One"),
-        (2, "user2", _hash("pass2"), "User Two"),
-        (3, "user3", _hash("pass3"), "User Three"),
+        (1, "ankush", _hash("ank123"), "Ankush"),
+        (2, "akash",  _hash("aka123"), "Akash"),
+        (3, "arpita", _hash("arp123"), "Arpita"),
+        (4, "sai",    _hash("sai123"), "Sai"),
     ]
     for uid, username, pwd_hash, display_name in default_users:
         c.execute(

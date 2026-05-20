@@ -84,7 +84,7 @@ def show_login():
         st.divider()
 
         with st.form("login_form"):
-            username = st.text_input("Username", placeholder="user1 / user2 / user3")
+            username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Log In", use_container_width=True)
 
@@ -97,7 +97,6 @@ def show_login():
             else:
                 st.error("Invalid username or password.")
 
-        st.caption("Default credentials — user1/pass1, user2/pass2, user3/pass3")
 
 
 # ---------------------------------------------------------------------------
