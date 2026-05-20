@@ -314,9 +314,11 @@ def show_add_sms():
                     # Merchant lookup button
                     if api_key() and st.button("🔍 Lookup", key=f"lookup_{i}",
                                                help="Search who this merchant really is"):
-                        with st.spinner("Looking up merchant…"):
-                            resolved = ai_service.lookup_merchant(api_key(), merchant)
+                        with st.spinner("Searching…"):
+                            resolved, source = ai_service.lookup_merchant(api_key(), merchant)
                         st.session_state[f"merchant_resolved_{i}"] = resolved
+                        src_label = {"known": "local db", "web": "web search", "ai": "AI", "original": "not found"}.get(source, source)
+                        st.toast(f"Found via {src_label}: {resolved}")
                         st.rerun()
 
                 with cols[1]:

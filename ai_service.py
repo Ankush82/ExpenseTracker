@@ -177,68 +177,129 @@ def _match_category(raw: str) -> str:
 # Merchant name lookup (cryptic UPI codes → real business names)
 # ---------------------------------------------------------------------------
 
-def _ddg_search(query: str) -> str:
-    """DuckDuckGo instant-answer API — free, no key needed."""
-    url = "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1".format(
-        urllib.parse.quote(query)
-    )
+# Known Indian UPI merchant codes — instant lookup, no network needed
+_KNOWN_MERCHANTS: dict[str, str] = {
+    "bundl techn": "Swiggy",
+    "bundltech": "Swiggy",
+    "internet pvt": "Swiggy",
+    "heisetasse beve": "Third Wave Coffee",
+    "heisetasse beverages": "Third Wave Coffee",
+    "zomato": "Zomato",
+    "blinkit": "Blinkit",
+    "grofers": "Blinkit",
+    "zepto": "Zepto",
+    "bigbasket": "BigBasket",
+    "dunzo": "Dunzo",
+    "swiggy instamart": "Swiggy Instamart",
+    "urbancompany": "Urban Company",
+    "urbanclap": "Urban Company",
+    "rentomojo": "RentoMojo",
+    "curefit": "Cult.fit",
+    "cultfit": "Cult.fit",
+    "practo": "Practo",
+    "pharmeasy": "PharmEasy",
+    "netmeds": "Netmeds",
+    "1mg": "1mg",
+    "apolloph": "Apollo Pharmacy",
+    "bookmysh": "BookMyShow",
+    "pvr cinema": "PVR Cinemas",
+    "inox": "INOX Cinemas",
+    "makemytrip": "MakeMyTrip",
+    "goibibo": "Goibibo",
+    "cleartrip": "Cleartrip",
+    "redbus": "RedBus",
+    "irctc": "Indian Railways",
+    "olacabs": "Ola Cabs",
+    "rapido": "Rapido",
+    "meesho": "Meesho",
+    "nykaa": "Nykaa",
+    "ajio": "AJIO",
+    "tatacliq": "Tata CLiQ",
+    "jiomart": "JioMart",
+    "phonepe": "PhonePe",
+    "paytm": "Paytm",
+    "gpay": "Google Pay",
+    "amazon pay": "Amazon",
+}
+
+
+def _ddg_html_search(query: str) -> list[str]:
+    """DuckDuckGo HTML search — returns top result snippets."""
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=6) as r:
-            data = json.loads(r.read())
-        return (
-            data.get("Abstract")
-            or (data.get("RelatedTopics") or [{}])[0].get("Text", "")
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
         )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            html = r.read().decode("utf-8", errors="ignore")
+        import re as _re
+        snippets = _re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, _re.DOTALL)
+        clean = [_re.sub(r"<[^>]+>", "", s).replace("&#x27;", "'").strip() for s in snippets[:3]]
+        return [s for s in clean if s]
     except Exception:
-        return ""
+        return []
 
 
-def lookup_merchant(api_key: str, merchant_code: str) -> str:
+def lookup_merchant(api_key: str, merchant_code: str) -> tuple[str, str]:
     """
-    Resolve a cryptic merchant code to a real business name.
-    E.g. 'HEISETASSE BEVE' → 'Thirdwave Coffee'
-    1. DuckDuckGo instant answer
-    2. AI reasoning fallback
-    Returns the resolved name, or the original if nothing found.
+    Resolve a cryptic UPI merchant code to a real business name.
+    Returns (resolved_name, source) where source is one of:
+      'known' | 'web' | 'ai' | 'original'
     """
-    # Skip lookup if it already looks like a real name
-    words = merchant_code.split()
-    if len(words) >= 2 and not merchant_code.isupper():
-        return merchant_code
+    code_lower = merchant_code.strip().lower()
 
-    # 1. DuckDuckGo
-    snippet = _ddg_search(f"{merchant_code} India merchant payment UPI")
-    if snippet and len(snippet) > 20:
-        # Ask AI to extract just the business name from the snippet
-        prompt = f"""Given this search result snippet about a payment merchant, extract ONLY the real business/brand name (1-4 words). If unclear, return the original code.
+    # 1. Local dictionary — instant
+    for key, name in _KNOWN_MERCHANTS.items():
+        if key in code_lower:
+            return name, "known"
+
+    # 2. DuckDuckGo HTML search
+    snippets = _ddg_html_search(f"{merchant_code} India UPI merchant company")
+    if snippets:
+        combined = " | ".join(snippets[:2])
+        # Ask AI to pull the brand name out of the search snippets
+        prompt = f"""Extract the real brand/business name for this Indian UPI merchant code.
 
 Merchant code: {merchant_code}
-Search snippet: {snippet}
+Web search results: {combined[:400]}
 
-Reply with ONLY the business name, nothing else."""
+Rules:
+- Return ONLY the short brand name (1-4 words), e.g. "Third Wave Coffee" or "Swiggy"
+- If the snippet mentions "popularly known as X" or "also known as X", use X
+- If genuinely unclear, return the original code
+
+Reply with ONLY the brand name, nothing else."""
         try:
             name = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=15).strip()
-            if name and name.lower() not in ("unknown", "none", merchant_code.lower()):
-                return name
+            name = name.strip('"').strip("'")
+            if name and name.lower() not in ("unknown", "none", code_lower) and len(name) < 50:
+                return name, "web"
         except Exception:
-            pass
+            pass  # fall through to AI-only reasoning
 
-    # 2. AI reasoning alone
-    prompt = f"""This is a cryptic merchant code from an Indian bank/UPI payment SMS: "{merchant_code}"
+    # 3. AI reasoning from the code name alone
+    prompt = f"""Decode this cryptic Indian UPI/bank merchant code into a real business name.
 
-Common patterns: BUNDL TECHN = Swiggy, HEISETASSE BEVE = Thirdwave Coffee (German: hot cup + beverage).
+Merchant code: "{merchant_code}"
 
-What real Indian business does "{merchant_code}" most likely refer to?
-Reply with ONLY the business name (2-5 words). If genuinely unknown, reply "Unknown"."""
+Known examples:
+- BUNDL TECHN → Swiggy (food delivery)
+- HEISETASSE BEVE → Third Wave Coffee ("Heiße Tasse" = hot cup in German)
+- INTERNET PVT → Swiggy
+- ZOMATO INDIA → Zomato
+
+What business is "{merchant_code}"? Reply with ONLY the business name (2-5 words).
+If you have no idea, reply: Unknown"""
     try:
         name = _chat(api_key, [{"role": "user", "content": prompt}], max_tokens=15).strip()
+        name = name.strip('"').strip("'")
         if name and name.lower() != "unknown":
-            return name
+            return name, "ai"
     except Exception:
         pass
 
-    return merchant_code
+    return merchant_code, "original"
 
 
 # ---------------------------------------------------------------------------
